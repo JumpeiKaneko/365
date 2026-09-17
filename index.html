@@ -8,8 +8,6 @@
 :root{
   --bg: #050506;
   --ink: #f0efe9;
-  --ink-faint: rgba(240,239,233,0.34);
-  --ink-fainter: rgba(240,239,233,0.14);
   --accent: #0028a8;
 }
 html,body{
@@ -36,15 +34,12 @@ canvas{ display:block; }
   box-sizing:border-box;
   transition: transform .2s;
 }
-#startOverlay:active .ring{
-  transform: scale(0.92);
-}
+#startOverlay:active .ring{ transform: scale(0.92); }
 
 #liveCount{
   position:fixed; right:22px; bottom:max(22px, env(safe-area-inset-bottom)); z-index:15;
   font-family: "Helvetica Neue", Arial, -apple-system, sans-serif;
-  font-weight:700;
-  font-size:19px; color:var(--accent);
+  font-weight:700; font-size:19px; color:var(--accent);
   font-variant-numeric: tabular-nums; opacity:0; transition: opacity 1s ease;
 }
 #liveCount.show{ opacity:1; }
@@ -57,9 +52,7 @@ canvas{ display:block; }
 <div id="liveCount"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
-
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
-
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 
 <script>
@@ -94,7 +87,7 @@ function decayFraction(){
 }
 
 /* ============================================================
-   疑似乱数
+   決定論的擬似乱数 (全端末共通)
 ============================================================ */
 function mulberry32(seed){
   let a = seed >>> 0;
@@ -137,8 +130,10 @@ function buildChord(seedNum, n){
   return stackTones(n).map(iv => root * Math.pow(2, iv/12));
 }
 
+// 共通仮想空間サイズ (1000x1000)
+const V_SIZE = 1000;
 let ballCount = 9;
-const BALL_R = 26;
+const BALL_R = 30; // 仮想空間内での球の半径
 let balls = [];
 let chordFreqs = [];
 
@@ -162,8 +157,6 @@ class Ball{
   }
 }
 
-let boundW, boundH, boundOffX = 0, boundOffY = 0;
-
 function initBalls(seedNum){
   const r = mulberry32(seedNum);
   balls = [];
@@ -173,10 +166,11 @@ function initBalls(seedNum){
     [ranks[i], ranks[j]] = [ranks[j], ranks[i]];
   }
   for (let i=0; i<ballCount; i++){
-    const x = boundOffX + r()*boundW;
-    const y = boundOffY + r()*boundH;
+    // 画面サイズに依存せず、1000x1000の絶対領域内に正確に配置
+    const x = 150 + r() * 700;
+    const y = 150 + r() * 700;
     const colorIdx = i % PALETTE.length;
-    balls.push(new Ball(x,y, chordFreqs[i], colorIdx, ranks[i], r()*1000));
+    balls.push(new Ball(x, y, chordFreqs[i], colorIdx, ranks[i], r()*1000));
   }
 }
 
@@ -218,17 +212,12 @@ function playChime(freq, panX, velMag, volumeScale){
   const detunes = [0, 7, -9];
   const oscs = detunes.map(det => {
     const osc = audioCtx.createOscillator();
-    osc.type = 'sine';
-    osc.frequency.value = freq;
-    osc.detune.value = det;
-    osc.connect(filter);
-    osc.start(now);
-    osc.stop(now + 3.6);
+    osc.type = 'sine'; osc.frequency.value = freq; osc.detune.value = det;
+    osc.connect(filter); osc.start(now); osc.stop(now + 3.6);
     return osc;
   });
   const upper = audioCtx.createOscillator();
-  upper.type = 'sine';
-  upper.frequency.value = freq*2;
+  upper.type = 'sine'; upper.frequency.value = freq*2;
   const upperGain = audioCtx.createGain();
   upperGain.gain.value = 0.12;
   upper.connect(upperGain); upperGain.connect(filter);
@@ -265,36 +254,33 @@ function playChime(freq, panX, velMag, volumeScale){
 }
 
 /* ============================================================
-   物理演算：共通の自律的な漂いと衝突計算
+   共通物理演算 (1000x1000 空間内で同期計算)
 ============================================================ */
 function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs){
   const active = balls.filter(b => b.rank < aliveCount);
 
-  // 時間軸（Date.now）を用いた絶対決定論的な漂い計算
+  // 絶対時間（Date.now）ベースの全端末で完全に重なる漂い運動
   const timeScale = nowMs * 0.00015;
   for (const b of active){
     const angle = noise(b.noiseSeed, timeScale) * Math.PI * 4;
-    const force = 0.018 * speedScale;
+    const force = 0.25 * speedScale;
     b.vx += Math.cos(angle) * force;
     b.vy += Math.sin(angle) * force;
-    b.vx *= 0.975; b.vy *= 0.975;
-
-    const sp = Math.hypot(b.vx, b.vy);
-    const maxSp = 0.55 * speedScale;
-    if (sp > maxSp && sp > 0){ b.vx = b.vx/sp*maxSp; b.vy = b.vy/sp*maxSp; }
+    
+    // 摩擦衰減
+    b.vx *= 0.95; b.vy *= 0.95;
 
     b.x += b.vx; b.y += b.vy;
 
     const r0 = ballRadiusNow;
-    const minX = boundOffX+r0, maxX = boundOffX+boundW-r0;
-    const minY = boundOffY+r0, maxY = boundOffY+boundH-r0;
-    if (b.x < minX){ b.x = minX; b.vx = Math.abs(b.vx)*0.6; }
-    if (b.x > maxX){ b.x = maxX; b.vx = -Math.abs(b.vx)*0.6; }
-    if (b.y < minY){ b.y = minY; b.vy = Math.abs(b.vy)*0.6; }
-    if (b.y > maxY){ b.y = maxY; b.vy = -Math.abs(b.vy)*0.6; }
+    const minVal = r0, maxVal = V_SIZE - r0;
+    if (b.x < minVal){ b.x = minVal; b.vx = Math.abs(b.vx)*0.8; }
+    if (b.x > maxVal){ b.x = maxVal; b.vx = -Math.abs(b.vx)*0.8; }
+    if (b.y < minVal){ b.y = minVal; b.vy = Math.abs(b.vy)*0.8; }
+    if (b.y > maxVal){ b.y = maxVal; b.vy = -Math.abs(b.vy)*0.8; }
   }
 
-  // 衝突判定とローカルでの発音処理
+  // 衝突判定
   for (let i=0; i<active.length; i++){
     for (let j=i+1; j<active.length; j++){
       const a = active[i], b = active[j];
@@ -312,14 +298,12 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
           const impact = Math.abs(relVel);
           
           if (nowMs - a.lastHit > HIT_COOLDOWN){
-            a.lastHit = nowMs;
-            a.flash = 1;
-            playChime(a.freq, (a.x/width)*2-1, impact, volumeScale);
+            a.lastHit = nowMs; a.flash = 1;
+            playChime(a.freq, (a.x/V_SIZE)*2-1, impact/10, volumeScale);
           }
           if (nowMs - b.lastHit > HIT_COOLDOWN){
-            b.lastHit = nowMs;
-            b.flash = 1;
-            playChime(b.freq, (b.x/width)*2-1, impact, volumeScale);
+            b.lastHit = nowMs; b.flash = 1;
+            playChime(b.freq, (b.x/V_SIZE)*2-1, impact/10, volumeScale);
           }
         }
       }
@@ -329,29 +313,30 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
 }
 
 /* ============================================================
-   加速度センサー & Firebaseリアルタイムイベント共有
+   加速度センサー & リアルタイム同期
 ============================================================ */
 let lastShakeTime = 0;
-const SHAKE_THRESHOLD = 18;
+const SHAKE_THRESHOLD = 14;
 
 function handleMotion(event){
   const acc = event.accelerationIncludingGravity;
   if (!acc) return;
   const magnitude = Math.sqrt(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
   const now = Date.now();
-  if (magnitude > SHAKE_THRESHOLD && now - lastShakeTime > 400 && balls.length > 0){
+  
+  if (magnitude > SHAKE_THRESHOLD && now - lastShakeTime > 300){
     lastShakeTime = now;
     
-    // 全員共通で影響を与える「方向」と「強さ」を判定
-    const angle = Math.atan2(acc.y, acc.x);
-    const strength = Math.min(1.0, (magnitude - SHAKE_THRESHOLD) / 25);
-    const targetIndex = Math.floor(Math.random() * balls.length);
+    const dirX = acc.x ? -acc.x / magnitude : (Math.random()-0.5);
+    const dirY = acc.y ? acc.y / magnitude : (Math.random()-0.5);
+    const power = Math.min(3.0, (magnitude - SHAKE_THRESHOLD) / 6 + 1.2);
 
+    // 全員へ送信
     shakeRef.push({
-      ballIndex: targetIndex,
-      angle: angle,
-      strength: strength,
-      timestamp: now
+      dirX: dirX,
+      dirY: dirY,
+      power: power,
+      ts: now
     });
   }
 }
@@ -368,40 +353,38 @@ function requestMotionPermission(){
   }
 }
 
-// 誰かが端末を揺らしたら、全端末の球に「大きな物理的撃発」と「視覚・音響インパルス」を与える
+const initTimestamp = Date.now() - 2000;
+
 shakeRef.limitToLast(1).on('child_added', (snapshot) => {
-  if (!running) return;
   const data = snapshot.val();
-  if (!data || !balls.length) return;
+  if (!data || !running) return;
+  if (data.ts && data.ts < initTimestamp) return;
 
-  const b = balls[data.ballIndex];
-  if (b){
-    // 揺らしたベクトルに応じた強烈なインパルスを与える
-    const force = 3.5 * data.strength;
-    b.vx += Math.cos(data.angle) * force;
-    b.vy += Math.sin(data.angle) * force;
-    b.flash = 1.0; // 発光
+  // 全端末の画面で、同じ方向に球を弾け飛ばす
+  const force = 18.0 * (data.power || 1.0);
+  const dx = data.dirX || 0;
+  const dy = data.dirY || 0;
 
-    // 揺らされた球から全端末で同時に「揺らし検出音」を共鳴させる
-    playChime(b.freq * 1.5, (b.x/width)*2-1, data.strength * 1.2, 1.0);
+  balls.forEach(b => {
+    b.vx += dx * force;
+    b.vy += dy * force;
+    b.flash = 1.0;
+  });
+
+  if (balls.length > 0){
+    playChime(balls[0].freq * 1.3, 0, 1.8, 1.0);
   }
 });
 
 /* ============================================================
-   p5 セットアップ／描画
+   p5 描画（仮想空間1000x1000を各端末の画面にスケーリング）
 ============================================================ */
 function setup(){
   const cnv = createCanvas(windowWidth, windowHeight);
   cnv.parent(document.getElementById('sketch-holder'));
   colorMode(RGB, 255);
-  computeBounds();
 }
-function computeBounds(){
-  const margin = Math.min(width, height) * 0.16;
-  boundOffX = margin; boundOffY = margin;
-  boundW = width - margin*2; boundH = height - margin*2;
-}
-function windowResized(){ resizeCanvas(windowWidth, windowHeight); computeBounds(); }
+function windowResized(){ resizeCanvas(windowWidth, windowHeight); }
 
 function draw(){
   noStroke();
@@ -423,6 +406,15 @@ function draw(){
 
   const active = updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, Date.now());
 
+  // 各端末の画面サイズに合わせて描画倍率とセンタリング領域を計算
+  const scaleFactor = Math.min(width, height) / V_SIZE;
+  const offsetX = (width - V_SIZE * scaleFactor) / 2;
+  const offsetY = (height - V_SIZE * scaleFactor) / 2;
+
+  push();
+  translate(offsetX, offsetY);
+  scale(scaleFactor);
+
   for (const b of active){
     const col = PALETTE[b.colorIdx];
     noStroke();
@@ -432,8 +424,9 @@ function draw(){
     } else {
       fill(col[0], col[1], col[2]);
     }
-    circle(b.x, b.y, ballRadiusNow*2);
+    circle(b.x, b.y, ballRadiusNow * 2);
   }
+  pop();
 
   const daysLeft = Math.max(0, Math.ceil((GLOBAL_END.getTime() - Date.now()) / (24*60*60*1000)));
   const liveEl = document.getElementById('liveCount');
@@ -479,16 +472,13 @@ document.getElementById('startOverlay').addEventListener('click', async ()=>{
 });
 
 function startPiece(){
-  computeBounds();
   const params = new URLSearchParams(location.search);
-  // URLクエリ（例: ?seed=123）が指定されていなければ全員「365」という共通種を使用
   const seedText = params.get('seed') || '365';
   const seedNum = seedFromString(seedText);
   
   chordFreqs = buildChord(seedNum, ballCount);
   initBalls(seedNum);
   running = true;
-  console.log('seed:', seedNum, '/ 経過率:', (decayFraction()*100).toFixed(2)+'%');
 }
 </script>
 </body>
