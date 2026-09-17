@@ -78,6 +78,7 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 const shakeRef = db.ref('shakes');
+const soundEventsRef = db.ref('soundEvents');
 
 /* ============================================================
    時間軸：現実の暦時間で1年かけて朽ちる
@@ -151,6 +152,7 @@ let running = false;
 let activeVoices = 0;
 const MAX_VOICES = 28;
 const HIT_COOLDOWN = 160;
+let currentVolumeScale = 1;
 
 class Ball{
   constructor(x,y,freq,colorIdx,rank,noiseSeed){
@@ -264,6 +266,9 @@ function playChime(freq, panX, velMag, volumeScale){
   };
 }
 
+/* ============================================================
+   物理：常時漂う。衝突はFirebaseへ送信
+============================================================ */
 function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs){
   const active = balls.filter(b => b.rank < aliveCount);
 
@@ -305,15 +310,16 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
           a.vx += nx*relVel*0.9; a.vy += ny*relVel*0.9;
           b.vx -= nx*relVel*0.9; b.vy -= ny*relVel*0.9;
           const impact = Math.abs(relVel);
+          // 衝突が起きたら直接鳴らさずFirebaseに送信
           if (nowMs - a.lastHit > HIT_COOLDOWN){
             a.lastHit = nowMs;
             a.flash = 1;
-            playChime(a.freq, (a.x/width)*2-1, impact, volumeScale);
+            soundEventsRef.push({ freq: a.freq, pan: (a.x/width)*2-1, impact, timestamp: nowMs });
           }
           if (nowMs - b.lastHit > HIT_COOLDOWN){
             b.lastHit = nowMs;
             b.flash = 1;
-            playChime(b.freq, (b.x/width)*2-1, impact, volumeScale);
+            soundEventsRef.push({ freq: b.freq, pan: (b.x/width)*2-1, impact, timestamp: nowMs });
           }
         }
       }
@@ -323,7 +329,34 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
 }
 
 /* ============================================================
-   加速度センサー：誰かが揺らしたら、Firebase経由で全員に伝わる
+   Firebase受信処理（音の共有 ＆ 揺れの共有）
+============================================================ */
+// どの端末で衝突が起きても、全端末で同じ音を鳴らす
+soundEventsRef.limitToLast(1).on('child_added', (snapshot) => {
+  if (!running) return;
+  const data = snapshot.val();
+  if (data) {
+    playChime(data.freq, data.pan, data.impact, currentVolumeScale);
+  }
+});
+
+// 誰かが端末を揺らしたら、全端末の球に力を加える
+shakeRef.limitToLast(1).on('child_added', (snapshot) => {
+  if (!running) return;
+  const data = snapshot.val();
+  if (data && balls.length > 0){
+    const b = balls[data.ballIndex];
+    if (b){
+      const angle = Math.random() * Math.PI * 2;
+      b.vx += Math.cos(angle) * data.strength * 2;
+      b.vy += Math.sin(angle) * data.strength * 2;
+      b.flash = 1;
+    }
+  }
+});
+
+/* ============================================================
+   加速度センサー検知
 ============================================================ */
 let lastShakeTime = 0;
 const SHAKE_THRESHOLD = 18;
@@ -356,18 +389,6 @@ function requestMotionPermission(){
   }
 }
 
-shakeRef.limitToLast(1).on('child_added', (snapshot) => {
-  if (!running) return;
-  const data = snapshot.val();
-  const b = balls[data.ballIndex];
-  if (b){
-    const angle = Math.random() * Math.PI * 2;
-    b.vx += Math.cos(angle) * data.strength * 2;
-    b.vy += Math.sin(angle) * data.strength * 2;
-    b.flash = 1;
-  }
-});
-
 /* ============================================================
    p5 セットアップ／描画
 ============================================================ */
@@ -395,6 +416,7 @@ function draw(){
   const aliveCount = Math.round(ballCount * (1 - t));
   const speedScale = lerp(1.0, 0.05, t);
   const volumeScale = Math.max(0, 1 - t);
+  currentVolumeScale = volumeScale; // 全端末の音再生用に保持
   const ballRadiusNow = Math.max(BALL_R*0.12, BALL_R * lerp(1.0, 0.12, t));
 
   if (masterFilter){
