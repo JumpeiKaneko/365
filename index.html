@@ -59,6 +59,7 @@ canvas{ display:block; }
 <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
 
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 
 <script>
@@ -78,7 +79,6 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 const shakeRef = db.ref('shakes');
-const soundEventsRef = db.ref('soundEvents');
 
 /* ============================================================
    時間軸：現実の暦時間で1年かけて朽ちる
@@ -141,7 +141,6 @@ let ballCount = 9;
 const BALL_R = 26;
 let balls = [];
 let chordFreqs = [];
-let rng = Math.random;
 
 let audioCtx = null;
 let masterGain = null;
@@ -152,7 +151,6 @@ let running = false;
 let activeVoices = 0;
 const MAX_VOICES = 28;
 const HIT_COOLDOWN = 160;
-let currentVolumeScale = 1;
 
 class Ball{
   constructor(x,y,freq,colorIdx,rank,noiseSeed){
@@ -267,12 +265,13 @@ function playChime(freq, panX, velMag, volumeScale){
 }
 
 /* ============================================================
-   物理：常時漂う。衝突はFirebaseへ送信
+   物理演算：共通の自律的な漂いと衝突計算
 ============================================================ */
 function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs){
   const active = balls.filter(b => b.rank < aliveCount);
 
-  const timeScale = frameCount * 0.0025;
+  // 時間軸（Date.now）を用いた絶対決定論的な漂い計算
+  const timeScale = nowMs * 0.00015;
   for (const b of active){
     const angle = noise(b.noiseSeed, timeScale) * Math.PI * 4;
     const force = 0.018 * speedScale;
@@ -295,6 +294,7 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
     if (b.y > maxY){ b.y = maxY; b.vy = -Math.abs(b.vy)*0.6; }
   }
 
+  // 衝突判定とローカルでの発音処理
   for (let i=0; i<active.length; i++){
     for (let j=i+1; j<active.length; j++){
       const a = active[i], b = active[j];
@@ -310,16 +310,16 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
           a.vx += nx*relVel*0.9; a.vy += ny*relVel*0.9;
           b.vx -= nx*relVel*0.9; b.vy -= ny*relVel*0.9;
           const impact = Math.abs(relVel);
-          // 衝突が起きたら直接鳴らさずFirebaseに送信
+          
           if (nowMs - a.lastHit > HIT_COOLDOWN){
             a.lastHit = nowMs;
             a.flash = 1;
-            soundEventsRef.push({ freq: a.freq, pan: (a.x/width)*2-1, impact, timestamp: nowMs });
+            playChime(a.freq, (a.x/width)*2-1, impact, volumeScale);
           }
           if (nowMs - b.lastHit > HIT_COOLDOWN){
             b.lastHit = nowMs;
             b.flash = 1;
-            soundEventsRef.push({ freq: b.freq, pan: (b.x/width)*2-1, impact, timestamp: nowMs });
+            playChime(b.freq, (b.x/width)*2-1, impact, volumeScale);
           }
         }
       }
@@ -329,34 +329,7 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
 }
 
 /* ============================================================
-   Firebase受信処理（音の共有 ＆ 揺れの共有）
-============================================================ */
-// どの端末で衝突が起きても、全端末で同じ音を鳴らす
-soundEventsRef.limitToLast(1).on('child_added', (snapshot) => {
-  if (!running) return;
-  const data = snapshot.val();
-  if (data) {
-    playChime(data.freq, data.pan, data.impact, currentVolumeScale);
-  }
-});
-
-// 誰かが端末を揺らしたら、全端末の球に力を加える
-shakeRef.limitToLast(1).on('child_added', (snapshot) => {
-  if (!running) return;
-  const data = snapshot.val();
-  if (data && balls.length > 0){
-    const b = balls[data.ballIndex];
-    if (b){
-      const angle = Math.random() * Math.PI * 2;
-      b.vx += Math.cos(angle) * data.strength * 2;
-      b.vy += Math.sin(angle) * data.strength * 2;
-      b.flash = 1;
-    }
-  }
-});
-
-/* ============================================================
-   加速度センサー検知
+   加速度センサー & Firebaseリアルタイムイベント共有
 ============================================================ */
 let lastShakeTime = 0;
 const SHAKE_THRESHOLD = 18;
@@ -366,12 +339,18 @@ function handleMotion(event){
   if (!acc) return;
   const magnitude = Math.sqrt(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
   const now = Date.now();
-  if (magnitude > SHAKE_THRESHOLD && now - lastShakeTime > 500 && balls.length > 0){
+  if (magnitude > SHAKE_THRESHOLD && now - lastShakeTime > 400 && balls.length > 0){
     lastShakeTime = now;
+    
+    // 全員共通で影響を与える「方向」と「強さ」を判定
+    const angle = Math.atan2(acc.y, acc.x);
+    const strength = Math.min(1.0, (magnitude - SHAKE_THRESHOLD) / 25);
     const targetIndex = Math.floor(Math.random() * balls.length);
+
     shakeRef.push({
       ballIndex: targetIndex,
-      strength: Math.min(1, magnitude / 40),
+      angle: angle,
+      strength: strength,
       timestamp: now
     });
   }
@@ -388,6 +367,25 @@ function requestMotionPermission(){
     window.addEventListener('devicemotion', handleMotion);
   }
 }
+
+// 誰かが端末を揺らしたら、全端末の球に「大きな物理的撃発」と「視覚・音響インパルス」を与える
+shakeRef.limitToLast(1).on('child_added', (snapshot) => {
+  if (!running) return;
+  const data = snapshot.val();
+  if (!data || !balls.length) return;
+
+  const b = balls[data.ballIndex];
+  if (b){
+    // 揺らしたベクトルに応じた強烈なインパルスを与える
+    const force = 3.5 * data.strength;
+    b.vx += Math.cos(data.angle) * force;
+    b.vy += Math.sin(data.angle) * force;
+    b.flash = 1.0; // 発光
+
+    // 揺らされた球から全端末で同時に「揺らし検出音」を共鳴させる
+    playChime(b.freq * 1.5, (b.x/width)*2-1, data.strength * 1.2, 1.0);
+  }
+});
 
 /* ============================================================
    p5 セットアップ／描画
@@ -416,7 +414,6 @@ function draw(){
   const aliveCount = Math.round(ballCount * (1 - t));
   const speedScale = lerp(1.0, 0.05, t);
   const volumeScale = Math.max(0, 1 - t);
-  currentVolumeScale = volumeScale; // 全端末の音再生用に保持
   const ballRadiusNow = Math.max(BALL_R*0.12, BALL_R * lerp(1.0, 0.12, t));
 
   if (masterFilter){
@@ -431,7 +428,7 @@ function draw(){
     noStroke();
     if (b.flash > 0.01){
       fill(FLASH_COLOR[0], FLASH_COLOR[1], FLASH_COLOR[2]);
-      b.flash -= 0.09;
+      b.flash -= 0.06;
     } else {
       fill(col[0], col[1], col[2]);
     }
@@ -484,9 +481,10 @@ document.getElementById('startOverlay').addEventListener('click', async ()=>{
 function startPiece(){
   computeBounds();
   const params = new URLSearchParams(location.search);
-  const seedText = params.get('seed') || '';
-  const seedNum = seedText ? seedFromString(seedText) : Math.floor(Math.random()*1e9);
-  rng = mulberry32(seedNum);
+  // URLクエリ（例: ?seed=123）が指定されていなければ全員「365」という共通種を使用
+  const seedText = params.get('seed') || '365';
+  const seedNum = seedFromString(seedText);
+  
   chordFreqs = buildChord(seedNum, ballCount);
   initBalls(seedNum);
   running = true;
