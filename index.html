@@ -47,6 +47,9 @@ canvas{ display:block; }
 </head>
 <body>
 
+<!-- マナーモード・ミュートを貫通させるための無音オーディオ -->
+<audio id="silent-audio" loop playsinline src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA="></audio>
+
 <div id="sketch-holder"></div>
 <div id="startOverlay"><div class="ring"></div></div>
 <div id="liveCount"></div>
@@ -133,7 +136,7 @@ function buildChord(seedNum, n){
 // 共通仮想空間サイズ (1000x1000)
 const V_SIZE = 1000;
 let ballCount = 9;
-const BALL_R = 30; // 仮想空間内での球の半径
+const BALL_R = 30;
 let balls = [];
 let chordFreqs = [];
 
@@ -166,7 +169,6 @@ function initBalls(seedNum){
     [ranks[i], ranks[j]] = [ranks[j], ranks[i]];
   }
   for (let i=0; i<ballCount; i++){
-    // 画面サイズに依存せず、1000x1000の絶対領域内に正確に配置
     const x = 150 + r() * 700;
     const y = 150 + r() * 700;
     const colorIdx = i % PALETTE.length;
@@ -259,7 +261,6 @@ function playChime(freq, panX, velMag, volumeScale){
 function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs){
   const active = balls.filter(b => b.rank < aliveCount);
 
-  // 絶対時間（Date.now）ベースの全端末で完全に重なる漂い運動
   const timeScale = nowMs * 0.00015;
   for (const b of active){
     const angle = noise(b.noiseSeed, timeScale) * Math.PI * 4;
@@ -267,7 +268,6 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
     b.vx += Math.cos(angle) * force;
     b.vy += Math.sin(angle) * force;
     
-    // 摩擦衰減
     b.vx *= 0.95; b.vy *= 0.95;
 
     b.x += b.vx; b.y += b.vy;
@@ -280,7 +280,6 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
     if (b.y > maxVal){ b.y = maxVal; b.vy = -Math.abs(b.vy)*0.8; }
   }
 
-  // 衝突判定
   for (let i=0; i<active.length; i++){
     for (let j=i+1; j<active.length; j++){
       const a = active[i], b = active[j];
@@ -328,10 +327,9 @@ function handleMotion(event){
     lastShakeTime = now;
     
     const dirX = acc.x ? -acc.x / magnitude : (Math.random()-0.5);
-    const dirY = acc.y ? acc.y / magnitude : (Math.random()-0.5);
+    const dirY = acc.y ? -acc.y / magnitude : (Math.random()-0.5);
     const power = Math.min(3.0, (magnitude - SHAKE_THRESHOLD) / 6 + 1.2);
 
-    // 全員へ送信
     shakeRef.push({
       dirX: dirX,
       dirY: dirY,
@@ -360,7 +358,6 @@ shakeRef.limitToLast(1).on('child_added', (snapshot) => {
   if (!data || !running) return;
   if (data.ts && data.ts < initTimestamp) return;
 
-  // 全端末の画面で、同じ方向に球を弾け飛ばす
   const force = 18.0 * (data.power || 1.0);
   const dx = data.dirX || 0;
   const dy = data.dirY || 0;
@@ -377,7 +374,23 @@ shakeRef.limitToLast(1).on('child_added', (snapshot) => {
 });
 
 /* ============================================================
-   p5 描画（仮想空間1000x1000を各端末の画面にスケーリング）
+   音声復帰（マナーモード・ミュート解除対応）
+============================================================ */
+async function unlockAudio() {
+  const silentAudio = document.getElementById('silent-audio');
+  if (silentAudio && silentAudio.paused) {
+    silentAudio.play().catch(() => {});
+  }
+  if (audioCtx && audioCtx.state === 'suspended') {
+    await audioCtx.resume();
+  }
+}
+
+window.addEventListener('touchstart', unlockAudio, { passive: true });
+window.addEventListener('click', unlockAudio, { passive: true });
+
+/* ============================================================
+   p5 描画
 ============================================================ */
 function setup(){
   const cnv = createCanvas(windowWidth, windowHeight);
@@ -406,7 +419,6 @@ function draw(){
 
   const active = updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, Date.now());
 
-  // 各端末の画面サイズに合わせて描画倍率とセンタリング領域を計算
   const scaleFactor = Math.min(width, height) / V_SIZE;
   const offsetX = (width - V_SIZE * scaleFactor) / 2;
   const offsetY = (height - V_SIZE * scaleFactor) / 2;
@@ -465,7 +477,7 @@ document.getElementById('startOverlay').addEventListener('click', async ()=>{
     masterFilter.connect(limiter);
     limiter.connect(audioCtx.destination);
   }
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  await unlockAudio();
   requestMotionPermission();
   startPiece();
   document.getElementById('startOverlay').classList.add('hidden');
