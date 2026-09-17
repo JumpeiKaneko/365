@@ -47,7 +47,6 @@ canvas{ display:block; }
 </head>
 <body>
 
-<!-- マナーモード・ミュートを貫通させるための無音オーディオ -->
 <audio id="silent-audio" loop playsinline src="data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA="></audio>
 
 <div id="sketch-holder"></div>
@@ -60,7 +59,7 @@ canvas{ display:block; }
 
 <script>
 /* ============================================================
-   Firebase初期化
+   Firebase初期化 & Presence（オンライン人数計測）
 ============================================================ */
 const firebaseConfig = {
   apiKey: "AIzaSyA54rAu9oAUtAt-Ej7A8_i0ed7GTEGSTtE",
@@ -74,10 +73,30 @@ const firebaseConfig = {
 };
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
-const shakeRef = db.ref('shakes');
+
+let onlineCount = 1;
+const presenceRef = db.ref('presence');
+const myPresenceRef = presenceRef.push();
+
+// 接続状態の監視
+db.ref('.info/connected').on('value', (snap) => {
+  if (snap.val() === true) {
+    myPresenceRef.onDisconnect().remove();
+    myPresenceRef.set(true);
+  }
+});
+
+// オンライン人数のリアルタイム更新
+presenceRef.on('value', (snap) => {
+  if (snap.exists()) {
+    onlineCount = snap.numChildren();
+  } else {
+    onlineCount = 1;
+  }
+});
 
 /* ============================================================
-   時間軸：現実の暦時間で1年かけて朽ちる
+   時間軸：開始前日（残り367日ベース）
 ============================================================ */
 const GLOBAL_START = new Date('2026-09-19T00:00:00+09:00');
 const YEAR_MS = 365 * 24 * 60 * 60 * 1000;
@@ -90,7 +109,7 @@ function decayFraction(){
 }
 
 /* ============================================================
-   決定論的擬似乱数 (全端末共通)
+   決定論的擬似乱数
 ============================================================ */
 function mulberry32(seed){
   let a = seed >>> 0;
@@ -133,10 +152,8 @@ function buildChord(seedNum, n){
   return stackTones(n).map(iv => root * Math.pow(2, iv/12));
 }
 
-// 共通仮想空間サイズ (1000x1000)
-const V_SIZE = 1000;
 let ballCount = 9;
-const BALL_R = 30;
+const BALL_R = 26;
 let balls = [];
 let chordFreqs = [];
 
@@ -160,6 +177,8 @@ class Ball{
   }
 }
 
+let boundW, boundH, boundOffX = 0, boundOffY = 0;
+
 function initBalls(seedNum){
   const r = mulberry32(seedNum);
   balls = [];
@@ -169,10 +188,10 @@ function initBalls(seedNum){
     [ranks[i], ranks[j]] = [ranks[j], ranks[i]];
   }
   for (let i=0; i<ballCount; i++){
-    const x = 150 + r() * 700;
-    const y = 150 + r() * 700;
+    const x = boundOffX + r()*boundW;
+    const y = boundOffY + r()*boundH;
     const colorIdx = i % PALETTE.length;
-    balls.push(new Ball(x, y, chordFreqs[i], colorIdx, ranks[i], r()*1000));
+    balls.push(new Ball(x,y, chordFreqs[i], colorIdx, ranks[i], r()*1000));
   }
 }
 
@@ -189,17 +208,20 @@ function createImpulseResponse(ctx, duration, decay){
   return impulse;
 }
 
+/* ============================================================
+   音響生成（接続人数 onlineCount に応じて和音・倍音を可変）
+============================================================ */
 function playChime(freq, panX, velMag, volumeScale){
   if (!audioCtx || activeVoices >= MAX_VOICES || volumeScale <= 0.003) return;
   activeVoices++;
   const now = audioCtx.currentTime;
 
+  // 人数が増えるほどフィルターが開放され、明るい音に変化
+  const cutoffFreq = Math.min(8000, 700 + (onlineCount - 1) * 600);
   const filter = audioCtx.createBiquadFilter();
   filter.type = 'lowpass';
   filter.Q.value = 0.3;
-  filter.frequency.setValueAtTime(700, now);
-  filter.frequency.linearRampToValueAtTime(2400, now + 1.2);
-  filter.frequency.linearRampToValueAtTime(500, now + 3.2);
+  filter.frequency.setValueAtTime(cutoffFreq, now);
 
   const gain = audioCtx.createGain();
   const peak = Math.min(0.24, 0.07 + velMag*0.45) * volumeScale;
@@ -211,44 +233,24 @@ function playChime(freq, panX, velMag, volumeScale){
   const panner = audioCtx.createStereoPanner();
   panner.pan.value = Math.max(-1, Math.min(1, panX));
 
-  const detunes = [0, 7, -9];
+  // 接続人数に応じて生成するデチューン音脈数を変化
+  const detunes = [0];
+  if (onlineCount >= 2) detunes.push(7);
+  if (onlineCount >= 3) detunes.push(-9);
+  if (onlineCount >= 5) detunes.push(14);
+
   const oscs = detunes.map(det => {
     const osc = audioCtx.createOscillator();
     osc.type = 'sine'; osc.frequency.value = freq; osc.detune.value = det;
     osc.connect(filter); osc.start(now); osc.stop(now + 3.6);
     return osc;
   });
-  const upper = audioCtx.createOscillator();
-  upper.type = 'sine'; upper.frequency.value = freq*2;
-  const upperGain = audioCtx.createGain();
-  upperGain.gain.value = 0.12;
-  upper.connect(upperGain); upperGain.connect(filter);
-  upper.start(now); upper.stop(now + 3.6);
 
   filter.connect(gain); gain.connect(panner); panner.connect(masterGain);
-
-  const strikeGain = audioCtx.createGain();
-  const strikePeak = Math.min(0.15, 0.035 + velMag*0.25) * volumeScale;
-  strikeGain.gain.setValueAtTime(0.0001, now);
-  strikeGain.gain.linearRampToValueAtTime(strikePeak, now + 0.005);
-  strikeGain.gain.exponentialRampToValueAtTime(0.0001, now + 1.1);
-  const strikeFund = audioCtx.createOscillator();
-  strikeFund.type = 'sine'; strikeFund.frequency.value = freq;
-  const strikePartial = audioCtx.createOscillator();
-  strikePartial.type = 'sine'; strikePartial.frequency.value = freq*2.76;
-  const strikePartialGain = audioCtx.createGain();
-  strikePartialGain.gain.value = 0.22;
-  strikeFund.connect(strikeGain);
-  strikePartial.connect(strikePartialGain); strikePartialGain.connect(strikeGain);
-  strikeGain.connect(panner);
-  strikeFund.start(now); strikePartial.start(now);
-  strikeFund.stop(now + 1.2); strikePartial.stop(now + 1.2);
 
   oscs[0].onended = () => {
     try{
       oscs.forEach(o=>o.disconnect());
-      upper.disconnect(); upperGain.disconnect();
-      strikeFund.disconnect(); strikePartial.disconnect(); strikePartialGain.disconnect(); strikeGain.disconnect();
       filter.disconnect(); gain.disconnect(); panner.disconnect();
     }catch(e){}
     activeVoices--;
@@ -256,7 +258,7 @@ function playChime(freq, panX, velMag, volumeScale){
 }
 
 /* ============================================================
-   共通物理演算 (1000x1000 空間内で同期計算)
+   物理演算
 ============================================================ */
 function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs){
   const active = balls.filter(b => b.rank < aliveCount);
@@ -264,20 +266,21 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
   const timeScale = nowMs * 0.00015;
   for (const b of active){
     const angle = noise(b.noiseSeed, timeScale) * Math.PI * 4;
-    const force = 0.25 * speedScale;
+    const force = 0.018 * speedScale;
     b.vx += Math.cos(angle) * force;
     b.vy += Math.sin(angle) * force;
     
-    b.vx *= 0.95; b.vy *= 0.95;
+    b.vx *= 0.98; b.vy *= 0.98;
 
     b.x += b.vx; b.y += b.vy;
 
     const r0 = ballRadiusNow;
-    const minVal = r0, maxVal = V_SIZE - r0;
-    if (b.x < minVal){ b.x = minVal; b.vx = Math.abs(b.vx)*0.8; }
-    if (b.x > maxVal){ b.x = maxVal; b.vx = -Math.abs(b.vx)*0.8; }
-    if (b.y < minVal){ b.y = minVal; b.vy = Math.abs(b.vy)*0.8; }
-    if (b.y > maxVal){ b.y = maxVal; b.vy = -Math.abs(b.vy)*0.8; }
+    const minX = boundOffX+r0, maxX = boundOffX+boundW-r0;
+    const minY = boundOffY+r0, maxY = boundOffY+boundH-r0;
+    if (b.x < minX){ b.x = minX; b.vx = Math.abs(b.vx)*0.8; }
+    if (b.x > maxX){ b.x = maxX; b.vx = -Math.abs(b.vx)*0.8; }
+    if (b.y < minY){ b.y = minY; b.vy = Math.abs(b.vy)*0.8; }
+    if (b.y > maxY){ b.y = maxY; b.vy = -Math.abs(b.vy)*0.8; }
   }
 
   for (let i=0; i<active.length; i++){
@@ -298,11 +301,11 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
           
           if (nowMs - a.lastHit > HIT_COOLDOWN){
             a.lastHit = nowMs; a.flash = 1;
-            playChime(a.freq, (a.x/V_SIZE)*2-1, impact/10, volumeScale);
+            playChime(a.freq, (a.x/width)*2-1, impact, volumeScale);
           }
           if (nowMs - b.lastHit > HIT_COOLDOWN){
             b.lastHit = nowMs; b.flash = 1;
-            playChime(b.freq, (b.x/V_SIZE)*2-1, impact/10, volumeScale);
+            playChime(b.freq, (b.x/width)*2-1, impact, volumeScale);
           }
         }
       }
@@ -312,69 +315,7 @@ function updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, nowMs
 }
 
 /* ============================================================
-   加速度センサー & リアルタイム同期
-============================================================ */
-let lastShakeTime = 0;
-const SHAKE_THRESHOLD = 14;
-
-function handleMotion(event){
-  const acc = event.accelerationIncludingGravity;
-  if (!acc) return;
-  const magnitude = Math.sqrt(acc.x*acc.x + acc.y*acc.y + acc.z*acc.z);
-  const now = Date.now();
-  
-  if (magnitude > SHAKE_THRESHOLD && now - lastShakeTime > 300){
-    lastShakeTime = now;
-    
-    const dirX = acc.x ? -acc.x / magnitude : (Math.random()-0.5);
-    const dirY = acc.y ? -acc.y / magnitude : (Math.random()-0.5);
-    const power = Math.min(3.0, (magnitude - SHAKE_THRESHOLD) / 6 + 1.2);
-
-    shakeRef.push({
-      dirX: dirX,
-      dirY: dirY,
-      power: power,
-      ts: now
-    });
-  }
-}
-
-function requestMotionPermission(){
-  if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
-    DeviceMotionEvent.requestPermission().then(state => {
-      if (state === 'granted'){
-        window.addEventListener('devicemotion', handleMotion);
-      }
-    }).catch(()=>{});
-  } else {
-    window.addEventListener('devicemotion', handleMotion);
-  }
-}
-
-const initTimestamp = Date.now() - 2000;
-
-shakeRef.limitToLast(1).on('child_added', (snapshot) => {
-  const data = snapshot.val();
-  if (!data || !running) return;
-  if (data.ts && data.ts < initTimestamp) return;
-
-  const force = 18.0 * (data.power || 1.0);
-  const dx = data.dirX || 0;
-  const dy = data.dirY || 0;
-
-  balls.forEach(b => {
-    b.vx += dx * force;
-    b.vy += dy * force;
-    b.flash = 1.0;
-  });
-
-  if (balls.length > 0){
-    playChime(balls[0].freq * 1.3, 0, 1.8, 1.0);
-  }
-});
-
-/* ============================================================
-   音声復帰（マナーモード・ミュート解除対応）
+   音声復帰
 ============================================================ */
 async function unlockAudio() {
   const silentAudio = document.getElementById('silent-audio');
@@ -396,8 +337,14 @@ function setup(){
   const cnv = createCanvas(windowWidth, windowHeight);
   cnv.parent(document.getElementById('sketch-holder'));
   colorMode(RGB, 255);
+  computeBounds();
 }
-function windowResized(){ resizeCanvas(windowWidth, windowHeight); }
+function computeBounds(){
+  const margin = Math.min(width, height) * 0.16;
+  boundOffX = margin; boundOffY = margin;
+  boundW = width - margin*2; boundH = height - margin*2;
+}
+function windowResized(){ resizeCanvas(windowWidth, windowHeight); computeBounds(); }
 
 function draw(){
   noStroke();
@@ -419,14 +366,6 @@ function draw(){
 
   const active = updatePhysics(aliveCount, speedScale, volumeScale, ballRadiusNow, Date.now());
 
-  const scaleFactor = Math.min(width, height) / V_SIZE;
-  const offsetX = (width - V_SIZE * scaleFactor) / 2;
-  const offsetY = (height - V_SIZE * scaleFactor) / 2;
-
-  push();
-  translate(offsetX, offsetY);
-  scale(scaleFactor);
-
   for (const b of active){
     const col = PALETTE[b.colorIdx];
     noStroke();
@@ -436,13 +375,15 @@ function draw(){
     } else {
       fill(col[0], col[1], col[2]);
     }
-    circle(b.x, b.y, ballRadiusNow * 2);
+    circle(b.x, b.y, ballRadiusNow*2);
   }
-  pop();
 
+  // 残り日数の計算（現在時点ベースで367日表示）
   const daysLeft = Math.max(0, Math.ceil((GLOBAL_END.getTime() - Date.now()) / (24*60*60*1000)));
+  const formattedCount = String(onlineCount).padStart(2, '0');
+  
   const liveEl = document.getElementById('liveCount');
-  liveEl.textContent = String(daysLeft).padStart(3,'0');
+  liveEl.textContent = `${formattedCount} / ${daysLeft}`;
   liveEl.classList.add('show');
 }
 
@@ -478,12 +419,12 @@ document.getElementById('startOverlay').addEventListener('click', async ()=>{
     limiter.connect(audioCtx.destination);
   }
   await unlockAudio();
-  requestMotionPermission();
   startPiece();
   document.getElementById('startOverlay').classList.add('hidden');
 });
 
 function startPiece(){
+  computeBounds();
   const params = new URLSearchParams(location.search);
   const seedText = params.get('seed') || '365';
   const seedNum = seedFromString(seedText);
